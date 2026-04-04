@@ -32,6 +32,12 @@ class TradeDecision(BaseModel):
     take_profit: Optional[float] = Field(None, description="Optionales Take-Profit Level")
     reasoning: str = Field(..., description="Begründung der Entscheidung inkl. Sektor-Limits und Risk-Limits")
 
+# Cash Management
+class CashAllocation(BaseModel):
+    ticker: str = Field(..., description="Das Ticker-Symbol des sicheren ETFs (aus der cash_parking_etfs Liste)")
+    allocation_eur: float = Field(..., description="Betrag in Euro, der dort geparkt werden soll")
+    reasoning: str = Field(..., description="Begründung für die Wahl dieses Geldmarkt-/Anleihen-ETFs")
+
 class RiskEvaluationOutput(BaseModel):
     portfolio_health_status: str = Field(..., description="Kurze Einschätzung der aktuellen Portfolio-Gesundheit")
     allocation_advice: str = Field(..., description="Konkrete Empfehlung zur Cash/Aktien Allokation basierend auf dem Market Regime")
@@ -42,10 +48,11 @@ class RiskEvaluationOutput(BaseModel):
 # ==========================================
 
 class InvestmentCrew:
-    def __init__(self, data_payload, current_portfolio, signal_prices):
+    def __init__(self, data_payload, current_portfolio, signal_prices, safe_haven_prices):
         self.data_payload = data_payload
         self.current_portfolio = current_portfolio
         self.signal_prices = signal_prices
+        self.safe_haven_prices = safe_haven_prices
         
         # Konfigurationsdateien laden
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -106,7 +113,8 @@ class InvestmentCrew:
 
         evaluate_desc = self.tasks_config['evaluate_risk']['description'].format(
             current_portfolio=json.dumps(self.current_portfolio),
-            signal_prices=json.dumps(self.signal_prices)
+            signal_prices=json.dumps(self.signal_prices),
+            safe_haven_prices=json.dumps(self.safe_haven_prices)
         )
         task_evaluate_risk = Task(
             description=evaluate_desc,

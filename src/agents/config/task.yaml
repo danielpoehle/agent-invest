@@ -14,13 +14,16 @@ evaluate_risk:
     Nutze die Ergebnisse des Data Agents und kombiniere sie mit dem aktuellen Portfolio-Status.
     AKTUELLES PORTFOLIO: {current_portfolio}
     NEUE SIGNALE (Preise): {signal_prices}
+    VERFÜGBARE CASH-PARKING ETFs (Preise): {safe_haven_prices}
     
     Schritt 1: Setze für jeden Kaufkandidaten ein sinnvolles Stop-Loss Level fest (z.B. unter einem markanten Chart-Level oder pauschal 5-10% unter dem Einstieg).
     Schritt 2: Wende DEINE Formel zur Positionsgröße (aus deiner Backstory) exakt an.
     Schritt 3: Prüfe die Sektor- und Regions-Limits und skaliere die berechnete Positionsgröße ggf. herunter.
+    Schritt 4: Betrachte das verbleibende Cash. Weise Rest-Cash sinnvoll den verfügbaren Cash-Parking ETFs zu, abhängig vom Market Regime.
   expected_output: >
     Ein strikter Risiko-Bericht mit konkreten Freigaben (Go/No-Go) pro Aktie. Muss zwingend enthalten: 
     Vorgeschlagener Stop-Loss, exakte berechnete Positionsgröße in Euro und die Begründung der Sektor/Regions-Prüfung.
+    Zusätzlich kommen in den Bericht die konkreten Allokations-Empfehlungen für ungenutztes Cash.
 
 write_report:
   description: >
@@ -37,6 +40,9 @@ write_report:
     
     # 🔥 Actionable Investments
     (Inhalt: Konkrete Empfehlungen für neue Investments: Ticker, berechnete Größe in €, Stop-Loss, Take-Profit und kurze Sentiment-Begründung)
+
+    # 🏦 Cash Management & Rendite-Strategie
+    (Inhalt: Konkrete Zuweisung von freiem Cash in Geldmarkt-/Anleihen-ETFs mit Ticker, Betrag in € und Begründung)
     
     # 🟡 Warme Watchlist
     (Inhalt: Aktien, die gut sind, aber noch keinen Einstieg zum heutigen Tag rechtfertigen oder vom Risk Agent blockiert oder skaliert wurden)

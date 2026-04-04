@@ -1,6 +1,7 @@
 import sys
 import os
 import yaml
+import yfinance as yf # NEU importiert für schnellen ETF Abruf
 from datetime import datetime, timedelta
 
 # FIX FÜR IMPORT-FEHLER: Fügt den src-Ordner zum Python-Suchpfad hinzu
@@ -16,11 +17,10 @@ def load_tickers():
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'settings.yaml')
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-            return config.get('trading', {}).get('tickers', [])
+            return yaml.safe_load(f)
     except FileNotFoundError:
         print("⚠️ settings.yaml nicht gefunden! Nutze Fallback-Ticker.")
-        return ["AAPL", "MSFT", "NVDA", "ASML", "SAP"]
+        return {"trading": {"tickers": ["AAPL", "MSFT", "NVDA", "ASML", "SAP"], "cash_parking_etfs": ["XEON.DE"]}}
 
 def main():
     print("\n" + "="*50)
@@ -41,11 +41,33 @@ def main():
     # ---------------------------------------------------------
     # SCHRITT 1: QUANT ENGINE (Chart-Analyse & Signale)
     # ---------------------------------------------------------
-    tickers = load_tickers()
+    settings = load_tickers()
+    tickers = settings.get('trading', {}).get('tickers', [])
+    safe_etfs = settings.get('trading', {}).get('cash_parking_etfs', [])
+
+    # Holen wir uns schnell die aktuellen Preise der sicheren ETFs (nur für heute)
+    safe_haven_prices = {}
+    if safe_etfs:
+        print(f"Lade aktuelle Kurse für Cash-Parking ETFs: {safe_etfs}...")
+        safe_data = yf.download(safe_etfs, period="1d", progress=False)
+        # Fallback auf Adj Close falls Close fehlt
+        col = 'Close' if 'Close' in safe_data.columns.get_level_values(0) else 'Adj Close'
+        for etf in safe_etfs:
+            try:
+                # Pandas MultiIndex Navigation
+                if len(safe_etfs) > 1:
+                    price = float(safe_data[col][etf].iloc[-1])
+                else:
+                    price = float(safe_data[col].iloc[-1])
+                safe_haven_prices[etf] = price
+            except Exception as e:
+                print(f"Konnte Preis für {etf} nicht laden.")
+
+
     print(f"\nÜberwache {len(tickers)} Ticker aus settings.yaml...")
 
     end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=5*365)).strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=2*365)).strftime('%Y-%m-%d')
     
     engine = QuantEngine(tickers, start_date, end_date)
     engine.fetch_data()
@@ -82,7 +104,7 @@ def main():
     # SCHRITT 4: KI AGENTEN CREW STARTEN
     # ---------------------------------------------------------
     try:
-        crew = InvestmentCrew(data_payload, current_portfolio, signal_prices)
+        crew = InvestmentCrew(data_payload, current_portfolio, signal_prices, safe_haven_prices)
         final_report_result = crew.run()
         report_text = str(final_report_result)
         

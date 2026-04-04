@@ -43,7 +43,7 @@ class QuantEngine:
         # 2. Dynamische Ticker: Wenn du in der settings.yaml neue Ticker hinzufügst,
         #    brauchen diese ohnehin die vollen 5 Jahre Historie.
         print(f"Lade frische Daten von Yahoo Finance für {len(self.tickers)} Ticker von {self.start_date} bis {self.end_date}...")
-        data = yf.download(self.tickers, start=self.start_date, end=self.end_date, progress=False)
+        data = yf.download(self.tickers, start=self.start_date, end=self.end_date, progress=False, threads=False)
         
         # Speichere Daten für spätere Aufrufe am selben Tag
         data.to_pickle(cache_file)
@@ -54,14 +54,16 @@ class QuantEngine:
         try:
             close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
             
+            # WICHTIG: .ffill() (Forward Fill) füllt Feiertags-Lücken mit dem Vortageskurs.
+            # Das verhindert, dass gemischte US/EU-Kalender die 200-Tage-Linie mit NaNs zerstören!
             if len(self.tickers) > 1:
-                self.price = data[close_col]
-                self.high = data['High']
-                self.low = data['Low']
+                self.price = data[close_col].ffill()
+                self.high = data['High'].ffill()
+                self.low = data['Low'].ffill()
             else:
-                self.price = data[[close_col]].rename(columns={close_col: self.tickers[0]})
-                self.high = data[['High']].rename(columns={'High': self.tickers[0]})
-                self.low = data[['Low']].rename(columns={'Low': self.tickers[0]})
+                self.price = data[[close_col]].rename(columns={close_col: self.tickers[0]}).ffill()
+                self.high = data[['High']].rename(columns={'High': self.tickers[0]}).ffill()
+                self.low = data[['Low']].rename(columns={'Low': self.tickers[0]}).ffill()
                 
         except Exception as e:
             print(f"Fehler beim Extrahieren der Spalten. Verfügbare Spalten: {data.columns.get_level_values(0).unique()}")
@@ -98,10 +100,32 @@ class QuantEngine:
         c3 = sma_150 > sma_200
         c4 = (sma_50 > sma_150) & (sma_50 > sma_200)
         c5 = sma_200 > sma_200_20d_ago
-        c6 = self.price >= (low_52w * 1.30)
+
+        # ANPASSUNG FÜR LARGE CAPS: 
+        # 30% Abstand zum 52W-Tief ist für schwere DAX/S&P500 Werte oft zu streng. 
+        # Wir lockern dies auf 20% (1.20), um starke, stetige Trends nicht auszuschließen.
+        c6 = self.price >= (low_52w * 1.20) 
+
         c7 = self.price >= (high_52w * 0.75)
         
         self.warm_list = c1 & c2 & c3 & c4 & c5 & c6 & c7
+
+        # ---------------------------------------------------------
+        # DIAGNOSTIK: Wir loggen, woran die Aktien scheitern
+        # ---------------------------------------------------------
+        print("\n" + "-"*50)
+        print("DIAGNOSTIK: Minervini Filter am letzten Handelstag")
+        print("-" * 50)
+        print(f"Total Tickers im Check : {len(self.tickers)}")
+        print(f"C1 (Preis > SMA50)     : {c1.iloc[-1].sum()} Aktien")
+        print(f"C2 (Preis > SMA200)    : {c2.iloc[-1].sum()} Aktien")
+        print(f"C3 (SMA150 > SMA200)   : {c3.iloc[-1].sum()} Aktien")
+        print(f"C4 (SMA50 > SMA150)    : {c4.iloc[-1].sum()} Aktien")
+        print(f"C5 (SMA200 steigt)     : {c5.iloc[-1].sum()} Aktien")
+        print(f"C6 (Preis > 1.20x Low) : {c6.iloc[-1].sum()} Aktien")
+        print(f"C7 (Preis > 0.75x High): {c7.iloc[-1].sum()} Aktien")
+        print(f"--> Überleben alle C1-C7 (WARM LIST) : {self.warm_list.iloc[-1].sum()} Aktien")
+        print("-" * 50 + "\n")
         
         pullback_trigger = rsi < 40 
         self.entries = self.warm_list & pullback_trigger

@@ -3,6 +3,7 @@ pandas
 numpy
 yfinance
 vectorbt
+lxml
 
 # KI & Agenten Frameworks (für später)
 crewai

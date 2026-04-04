@@ -113,6 +113,12 @@ class DatabaseManager:
             VALUES (?, ?, ?)
         ''', (today, markdown_text, raw_json))
         self.conn.commit()
+    
+    def has_report_for_today(self):
+        """Prüft, ob für den heutigen Tag bereits ein Bericht existiert."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        self.cursor.execute("SELECT 1 FROM daily_reports WHERE date = ?", (today,))
+        return self.cursor.fetchone() is not None
 
     def get_latest_report(self):
         self.cursor.execute("SELECT markdown_text FROM daily_reports ORDER BY date DESC LIMIT 1")
