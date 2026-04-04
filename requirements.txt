@@ -1,0 +1,13 @@
+# Daten & Quant Frameworks
+pandas
+numpy
+yfinance
+vectorbt
+
+# KI & Agenten Frameworks (für später)
+crewai
+langchain-google-genai
+python-dotenv
+
+# Frontend (für später)
+streamlit
