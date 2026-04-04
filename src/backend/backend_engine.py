@@ -1,137 +1,177 @@
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import vectorbt as vbt
-import yfinance as yf
+import os
+from datetime import datetime, timedelta
 
-# ==========================================
-# 1. PARAMETER FÜR DIE STRATEGIE
-# ==========================================
-TICKERS = ["AAPL", "MSFT", "NVDA", "ASML", "SAP", "TSLA", "META"] 
-START_DATE = "2014-01-01" 
-END_DATE = "2024-01-01"
+class QuantEngine:
+    def __init__(self, tickers, start_date, end_date):
+        self.tickers = tickers
+        self.start_date = start_date
+        self.end_date = end_date
+        
+        self.price = None
+        self.high = None
+        self.low = None
+        
+        self.entries = None
+        self.exits = None
+        self.warm_list = None
+        
+    def fetch_data(self):
+        """Lädt historische Daten über yfinance herunter (mit täglichem Cache)."""
+        cache_dir = "data"
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, "market_data_cache.pkl")
+        today = datetime.now().strftime('%Y-%m-%d')
 
-# ==========================================
-# 2. DATENBESCHAFFUNG 
-# ==========================================
-print(f"Lade Daten für {len(TICKERS)} Ticker...")
-data = yf.download(TICKERS, start=START_DATE, end=END_DATE)
+        # 1. Prüfe, ob wir heute schon Daten heruntergeladen haben
+        if os.path.exists(cache_file):
+            cache_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
+            if cache_time.strftime('%Y-%m-%d') == today:
+                print("Lade historische Daten rasend schnell aus lokalem Cache...")
+                data = pd.read_pickle(cache_file)
+                self._process_data(data)
+                return
 
-# Sicherer Zugriff auf die Kurs-Spalten (Fallback für neuere yfinance Versionen)
-close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
-price = data[close_col]
-high = data['High']
-low = data['Low']
+        # 2. Wenn nicht (oder neuer Tag), lade frisch von Yahoo Finance.
+        # HINWEIS ZUM CACHING: Wir laden absichtlich JEDEN TAG die kompletten 5 Jahre neu,
+        # anstatt nur die fehlenden Tage anzuhängen. Der Grund: 
+        # 1. Aktiensplits & Dividenden: yfinance passt historische Daten rückwirkend an. 
+        #    Ein bloßes Anhängen würde bei einem Split (z.B. 1:10) zu falschen Crash-Signalen führen.
+        # 2. Dynamische Ticker: Wenn du in der settings.yaml neue Ticker hinzufügst,
+        #    brauchen diese ohnehin die vollen 5 Jahre Historie.
+        print(f"Lade frische Daten von Yahoo Finance für {len(self.tickers)} Ticker von {self.start_date} bis {self.end_date}...")
+        data = yf.download(self.tickers, start=self.start_date, end=self.end_date, progress=False)
+        
+        # Speichere Daten für spätere Aufrufe am selben Tag
+        data.to_pickle(cache_file)
+        self._process_data(data)
 
-# ==========================================
-# 3. INDIKATOREN BERECHNEN (Vektorisiert)
-# ==========================================
-print("Berechne technische Indikatoren...")
+    def _process_data(self, data):
+        """Hilfsfunktion zum Zuweisen der heruntergeladenen oder gecachten Daten."""
+        try:
+            close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
+            
+            if len(self.tickers) > 1:
+                self.price = data[close_col]
+                self.high = data['High']
+                self.low = data['Low']
+            else:
+                self.price = data[[close_col]].rename(columns={close_col: self.tickers[0]})
+                self.high = data[['High']].rename(columns={'High': self.tickers[0]})
+                self.low = data[['Low']].rename(columns={'Low': self.tickers[0]})
+                
+        except Exception as e:
+            print(f"Fehler beim Extrahieren der Spalten. Verfügbare Spalten: {data.columns.get_level_values(0).unique()}")
+            raise e
+            
+        print("Daten erfolgreich geladen und verarbeitet.")
 
-# Gleitende Durchschnitte (inkl. Korrektur der Spaltennamen für Pandas/Vectorbt)
-sma_50 = vbt.MA.run(price, window=50).ma
-sma_50.columns = price.columns
+    def run_strategy(self):
+        """Berechnet die Minervini-Kriterien und den Pullback-Trigger."""
+        print("Berechne Indikatoren und Signale...")
+        
+        sma_50 = vbt.MA.run(self.price, window=50).ma
+        sma_50.columns = self.price.columns 
+        
+        sma_150 = vbt.MA.run(self.price, window=150).ma
+        sma_150.columns = self.price.columns 
+        
+        sma_200 = vbt.MA.run(self.price, window=200).ma
+        sma_200.columns = self.price.columns 
+        
+        sma_200_20d_ago = sma_200.shift(20)
+        
+        high_52w = self.high.rolling(window=252).max()
+        low_52w = self.low.rolling(window=252).min()
+        
+        rsi = vbt.RSI.run(self.price, window=14).rsi
+        rsi.columns = self.price.columns 
+        
+        # ==========================================
+        # SIGNAL LOGIK: Minervini Trend Template
+        # ==========================================
+        c1 = self.price > sma_50
+        c2 = (self.price > sma_150) & (self.price > sma_200)
+        c3 = sma_150 > sma_200
+        c4 = (sma_50 > sma_150) & (sma_50 > sma_200)
+        c5 = sma_200 > sma_200_20d_ago
+        c6 = self.price >= (low_52w * 1.30)
+        c7 = self.price >= (high_52w * 0.75)
+        
+        self.warm_list = c1 & c2 & c3 & c4 & c5 & c6 & c7
+        
+        pullback_trigger = rsi < 40 
+        self.entries = self.warm_list & pullback_trigger
+        
+        self.exits = self.price < sma_50
+        
+        print("Signale erfolgreich generiert.")
 
-sma_150 = vbt.MA.run(price, window=150).ma
-sma_150.columns = price.columns
+    def run_backtest(self, init_cash=100000, fees=0.001):
+        """Führt einen Backtest der Strategie durch und gibt Statistiken pro Aktie aus."""
+        print("\nStarte Backtest-Simulation...")
+        portfolio = vbt.Portfolio.from_signals(
+            self.price,
+            self.entries,
+            self.exits,
+            init_cash=init_cash,
+            fees=fees,
+            freq='D'
+        )
+        
+        print("\n" + "="*60)
+        print("BACKTEST ERGEBNISSE (Pro Ticker)")
+        print("="*60)
+        
+        results = pd.DataFrame({
+            'Rendite [%]': portfolio.total_return() * 100,
+            'Max Drawdown [%]': portfolio.max_drawdown() * 100,
+            'Win Rate [%]': portfolio.trades.win_rate() * 100,
+            'Anzahl Trades': portfolio.trades.count()
+        })
+        
+        results.fillna(0, inplace=True)
+        print(results.sort_values(by='Rendite [%]', ascending=False).round(2))
+        return portfolio
 
-sma_200 = vbt.MA.run(price, window=200).ma
-sma_200.columns = price.columns
+    def get_current_signals(self):
+        """Liefert die Signale des LETZTEN Handelstages."""
+        latest_entries = self.entries.iloc[-1]
+        latest_warm = self.warm_list.iloc[-1]
+        latest_date = self.entries.index[-1].strftime('%Y-%m-%d')
+        
+        hot_stocks = latest_entries[latest_entries == True].index.tolist()
+        warm_candidates = latest_warm[latest_warm == True].index.tolist()
+        warm_stocks = [ticker for ticker in warm_candidates if ticker not in hot_stocks]
+        
+        return {
+            "date": latest_date,
+            "hot_watchlist": hot_stocks,
+            "warm_watchlist": warm_stocks
+        }
 
-# SMA 200 Trend (Ist der SMA 200 höher als vor 20 Handelstagen / ~4 Wochen?)
-sma_200_20d_ago = sma_200.shift(20)
-
-# 52-Wochen Hoch und Tief (252 Handelstage)
-high_52w = high.rolling(window=252).max()
-low_52w = low.rolling(window=252).min()
-
-# Pullback Indikator (inkl. Korrektur der Spaltennamen)
-rsi = vbt.RSI.run(price, window=14).rsi
-rsi.columns = price.columns
-
-# ==========================================
-# 4. SIGNAL-GENERIERUNG (Logik)
-# ==========================================
-
-# --- SCHRITT 1: DIE 7 "MINERVINI" TREND-KRITERIEN (Warme Watchlist) ---
-c1 = price > sma_50
-c2 = (price > sma_150) & (price > sma_200)
-c3 = sma_150 > sma_200
-c4 = (sma_50 > sma_150) & (sma_50 > sma_200)
-c5 = sma_200 > sma_200_20d_ago # SMA200 steigt seit 4 Wochen
-c6 = price >= (low_52w * 1.30) # Mind. 30% über 52W-Tief
-c7 = price >= (high_52w * 0.75) # Max. 25% unter 52W-Hoch
-
-# Alle Kriterien müssen erfüllt sein für den "Trend-Modus"
-trend_template_active = c1 & c2 & c3 & c4 & c5 & c6 & c7
-
-# --- SCHRITT 2: DER PULLBACK TRIGGER (Heiße Watchlist) ---
-# Wir suchen nach einem Rücksetzer innerhalb dieses starken Trends
-pullback_trigger = rsi < 40 
-
-# KAUFSIGNAL: Trend Template ist erfüllt UND wir haben einen Pullback
-entries = trend_template_active & pullback_trigger
-
-# VERKAUFSIGNAL: Wenn die Struktur bricht (Kurs fällt unter SMA 50)
-exits = price < sma_50
-
-# ==========================================
-# 5. BACKTEST AUSFÜHREN
-# ==========================================
-print("Führe Backtest durch...")
-portfolio = vbt.Portfolio.from_signals(
-    price, 
-    entries, 
-    exits, 
-    init_cash=10000, 
-    fees=0.001, 
-    freq='D' 
-)
-
-print("\n--- BACKTEST ERGEBNISSE ---")
-# Generiere Tabelle pro Ticker, um NaN-Fehler durch fehlende Trades zu vermeiden
-results = pd.DataFrame({
-    'Rendite [%]': portfolio.total_return() * 100,
-    'Max Drawdown [%]': portfolio.max_drawdown() * 100,
-    'Win Rate [%]': portfolio.trades.win_rate() * 100,
-    'Anzahl Trades': portfolio.trades.count()
-})
-
-results.fillna(0, inplace=True)
-print(results.sort_values(by='Rendite [%]', ascending=False).round(2))
-
-
-# ==========================================
-# 6. GESAMT-PORTFOLIO & BENCHMARK VERGLEICH
-# ==========================================
-print("\nLade Benchmark-Daten (MSCI World ETF - URTH)...")
-# URTH ist der Ticker für den iShares MSCI World ETF
-benchmark_data = yf.download(["URTH"], start=START_DATE, end=END_DATE, progress=False)
-
-bench_close_col = 'Close' if 'Close' in benchmark_data.columns.get_level_values(0) else 'Adj Close'
-benchmark_price = benchmark_data[bench_close_col]
-
-# Absicherung, falls es als DataFrame geliefert wird
-if isinstance(benchmark_price, pd.DataFrame):
-    benchmark_price = benchmark_price.squeeze()
-
-# Buy & Hold Return des Benchmarks berechnen
-benchmark_return = (benchmark_price.iloc[-1] / benchmark_price.iloc[0] - 1) * 100
-
-# Gesamtes Startkapital (10.000 pro Ticker)
-total_start_value = 10000 * len(TICKERS)
-# Summe aller Endwerte der Einzelportfolios (Equity Curve am letzten Tag)
-total_end_value = portfolio.value().iloc[-1].sum()
-total_portfolio_return = ((total_end_value / total_start_value) - 1) * 100
-
-print("\n" + "="*60)
-print("GESAMTPORTFOLIO VS. BENCHMARK (MSCI World)")
-print("="*60)
-print(f"Startkapital Gesamt:       {total_start_value:,.2f} €")
-print(f"Endkapital Gesamt:         {total_end_value:,.2f} €")
-print(f"Gesamtrendite Strategie:   {total_portfolio_return:.2f} %")
-print(f"Buy & Hold MSCI World:     {float(benchmark_return):.2f} %")
-print("="*60)
-
-# In der Produktion würde das System nun ausgeben:
-# "Folgende Aktien sind heute HEISS (Kaufsignal): [Liste]"
-# "Folgende Aktien sind WARM (Trend Template erfüllt, warten auf Pullback): [Liste]"
+if __name__ == "__main__":
+    test_tickers = [
+        "AAPL", "MSFT", "NVDA", "ASML", "SAP", "TSLA", 
+        "JNJ", "XOM", "JPM", "ALV.DE", "MUV2.DE"
+    ]
+    
+    end_date = datetime.now().strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=5*365)).strftime('%Y-%m-%d')
+    
+    engine = QuantEngine(test_tickers, start_date, end_date)
+    
+    engine.fetch_data()
+    engine.run_strategy()
+    engine.run_backtest()
+    
+    today_signals = engine.get_current_signals()
+    
+    print("\n" + "="*60)
+    print(f"AKTUELLE SIGNALE (Stand: {today_signals['date']})")
+    print("="*60)
+    print(f"🔥 HEISSE Watchlist (Kaufsignale): {today_signals['hot_watchlist']}")
+    print(f"🟡 WARME Watchlist (Trend intakt): {today_signals['warm_watchlist']}")

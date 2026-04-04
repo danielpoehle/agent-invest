@@ -1,0 +1,13 @@
+trading:
+  # Hier kannst du jederzeit Ticker hinzufügen oder entfernen, 
+  # ohne den Python-Code anfassen zu müssen!
+  tickers:
+    - AAPL
+    - MSFT
+    - NVDA
+    - ASML
+    - SAP
+    - TSLA
+    - META
+    - ALV.DE  # Allianz
+    - MUV2.DE # Munich Re
