@@ -11,3 +11,9 @@ trading:
     - META
     - ALV.DE  # Allianz
     - MUV2.DE # Munich Re
+
+  # Sichere Häfen / Rendite für ungenutztes Cash
+  # z.B. XEON.DE (Euro Overnight Rate Swap) oder EUN3.DE (Global Aggregate Bond)
+  cash_parking_etfs:
+    - XEON.DE
+    - EUN3.DE

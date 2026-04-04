@@ -27,10 +27,18 @@ write_report:
     Führe die Ergebnisse des Data Agents und des Risk Agents zusammen.
     Erstelle das 'Daily Morning Briefing' im Markdown-Format.
     
-    Strukturvorgabe:
-    # 🌤️ Markt-Wetter (Zusammenfassung Makro & Regime)
-    # 🛡️ Portfolio Gesundheitscheck (Risiko-Warnungen)
-    # 🔥 Actionable Intel (Konkrete Kaufempfehlungen mit Ticker, berechnete Größe in €, Stop-Loss, Take-Profit und kurzer Sentiment-Begründung)
-    # 🟡 Warme Watchlist (Aktien, die gut sind, aber noch keinen Einstieg zum heutigen Tag rechtfertigen oder vom Risk Agent blockiert oder skaliert wurden)
+    Strukturvorgabe (Nutze EXAKT diese Überschriften ohne Zusätze):
+    
+    # 🌤️ Markt-Wetter
+    (Inhalt: Zusammenfassung Makro & Regime)
+    
+    # 🛡️ Portfolio Gesundheitscheck
+    (Inhalt: Risiko-Warnungen, z.B. zu Sektoren/Ländern, aber auch Hinweise, wenn man bei aktuellen Investments in die Nähe von Stop Loss oder Take Profit kommt)
+    
+    # 🔥 Actionable Investments
+    (Inhalt: Konkrete Empfehlungen für neue Investments: Ticker, berechnete Größe in €, Stop-Loss, Take-Profit und kurze Sentiment-Begründung)
+    
+    # 🟡 Warme Watchlist
+    (Inhalt: Aktien, die gut sind, aber noch keinen Einstieg zum heutigen Tag rechtfertigen oder vom Risk Agent blockiert oder skaliert wurden)
   expected_output: >
     Ein sauber formatiertes, professionelles Markdown-Dokument.
