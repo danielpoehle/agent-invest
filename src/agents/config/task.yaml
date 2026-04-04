@@ -1,0 +1,36 @@
+analyze_data:
+  description: >
+    Analysiere die folgenden tagesaktuellen Marktdaten und Nachrichten:
+    DATEN-PAYLOAD: {data_payload}
+    
+    Schritt 1: Bestimme das 'Market Regime' (RISK_ON, RISK_OFF, NEUTRAL) basierend auf VIX und Zinskurve.
+    Schritt 2: Lies die Nachrichten zu den 'hot_stocks'. Beachte zwingend das Alter der News (published_at). Alte News haben wenig Gewicht.
+    Schritt 3: Vergib pro Aktie einen Sentiment-Score von 1 (extrem bärisch) bis 10 (extrem bullisch).
+  expected_output: >
+    Ein detaillierter Textbericht, der das Makro-Regime begründet und für jede Aktie einen Sentiment-Score samt kurzer Begründung liefert.
+
+evaluate_risk:
+  description: >
+    Nutze die Ergebnisse des Data Agents und kombiniere sie mit dem aktuellen Portfolio-Status.
+    AKTUELLES PORTFOLIO: {current_portfolio}
+    NEUE SIGNALE (Preise): {signal_prices}
+    
+    Schritt 1: Setze für jeden Kaufkandidaten ein sinnvolles Stop-Loss Level fest (z.B. unter einem markanten Chart-Level oder pauschal 5-10% unter dem Einstieg).
+    Schritt 2: Wende DEINE Formel zur Positionsgröße (aus deiner Backstory) exakt an.
+    Schritt 3: Prüfe die Sektor- und Regions-Limits und skaliere die berechnete Positionsgröße ggf. herunter.
+  expected_output: >
+    Ein strikter Risiko-Bericht mit konkreten Freigaben (Go/No-Go) pro Aktie. Muss zwingend enthalten: 
+    Vorgeschlagener Stop-Loss, exakte berechnete Positionsgröße in Euro und die Begründung der Sektor/Regions-Prüfung.
+
+write_report:
+  description: >
+    Führe die Ergebnisse des Data Agents und des Risk Agents zusammen.
+    Erstelle das 'Daily Morning Briefing' im Markdown-Format.
+    
+    Strukturvorgabe:
+    # 🌤️ Markt-Wetter (Zusammenfassung Makro & Regime)
+    # 🛡️ Portfolio Gesundheitscheck (Risiko-Warnungen)
+    # 🔥 Actionable Intel (Konkrete Kaufempfehlungen mit Ticker, berechnete Größe in €, Stop-Loss, Take-Profit und kurzer Sentiment-Begründung)
+    # 🟡 Warme Watchlist (Aktien, die gut sind, aber noch keinen Einstieg zum heutigen Tag rechtfertigen oder vom Risk Agent blockiert oder skaliert wurden)
+  expected_output: >
+    Ein sauber formatiertes, professionelles Markdown-Dokument.
