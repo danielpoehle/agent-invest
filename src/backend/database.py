@@ -15,7 +15,16 @@ class DatabaseManager:
 
     def _create_tables(self):
         """Erstellt die Tabellen, falls sie noch nicht existieren."""
-        # Tabelle für den aktuellen Cash-Bestand
+
+        # 1. System Konfiguration (Startdatum, Startkapital etc.)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS system_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        ''')
+
+        # 2. Tabelle für den aktuellen Cash-Bestand
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS cash_balance (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -23,12 +32,14 @@ class DatabaseManager:
             )
         ''')
         
-        # Tabelle für das aktuelle Portfolio (gehaltene Aktien)
+        # 3. Tabelle für das aktuelle Portfolio (gehaltene Aktien)
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS portfolio (
                 ticker TEXT PRIMARY KEY,
                 sector TEXT NOT NULL,
                 region TEXT NOT NULL,
+                shares REAL NOT NULL DEFAULT 0,
+                avg_price REAL NOT NULL DEFAULT 0,
                 invested_value REAL NOT NULL
             )
         ''')
@@ -40,7 +51,7 @@ class DatabaseManager:
         except sqlite3.OperationalError:
             pass # Spalten existieren bereits
             
-        # NEU: Tabelle für die Trade-Historie (Das "Kassenbuch")
+        # 4. Tabelle für die Trade-Historie (Das "Kassenbuch")
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS trade_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +66,7 @@ class DatabaseManager:
             )
         ''')
         
-        # Tabelle für die täglichen Berichte
+        # 5. Tabelle für die täglichen Berichte
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS daily_reports (
                 date TEXT PRIMARY KEY,
@@ -65,17 +76,45 @@ class DatabaseManager:
         ''')
         self.conn.commit()
         
-        # Startkapital setzen, falls die Datenbank ganz neu ist
+        # Initial-Befüllung, falls die Datenbank ganz neu ist
         self.cursor.execute("SELECT balance FROM cash_balance WHERE id = 1")
         if not self.cursor.fetchone():
-            self.cursor.execute("INSERT INTO cash_balance (id, balance) VALUES (1, 100000.0)")
+            default_start = 100000.0
+            today_str = datetime.today().strftime('%Y-%m-%d')
+            self.cursor.execute("INSERT INTO cash_balance (id, balance) VALUES (1, ?)", (default_start,))
+            self.cursor.execute("INSERT OR IGNORE INTO system_config (key, value) VALUES ('inception_date', ?)", (today_str,))
+            self.cursor.execute("INSERT OR IGNORE INTO system_config (key, value) VALUES ('inception_balance', ?)", (str(default_start),))
             self.conn.commit()
+
+    def reset_database(self, start_date_str, start_balance):
+        """DER URKNALL: Löscht alle Daten und setzt das System komplett neu auf."""
+        # Alle relevanten Tabellen leeren
+        tables = ['cash_balance', 'portfolio', 'trade_history', 'daily_reports', 'system_config']
+        for table in tables:
+            self.cursor.execute(f"DROP TABLE IF EXISTS {table}")
+        
+        self.conn.commit()
+        
+        # Tabellen neu erstellen
+        self._create_tables()
+        
+        # Mit neuen "Urknall"-Werten überschreiben
+        self.cursor.execute("UPDATE cash_balance SET balance = ? WHERE id = 1", (start_balance,))
+        self.cursor.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('inception_date', ?)", (start_date_str,))
+        self.cursor.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('inception_balance', ?)", (str(start_balance),))
+        self.conn.commit()
+
+    def get_system_config(self, key):
+        """Liest einen Konfigurationswert aus."""
+        self.cursor.execute("SELECT value FROM system_config WHERE key = ?", (key,))
+        row = self.cursor.fetchone()
+        return row[0] if row else None
 
     def get_portfolio_for_agent(self):
         """Liest die DB aus und formatiert das Portfolio als JSON/Dict für den Risk Agent."""
         self.cursor.execute("SELECT balance FROM cash_balance WHERE id = 1")
         cash_row = self.cursor.fetchone()
-        cash = cash_row[0] if cash_row else 100000.0
+        cash = cash_row[0] if cash_row else 0.0
         
         self.cursor.execute("SELECT ticker, sector, region, invested_value, shares, avg_price FROM portfolio")
         equities = []

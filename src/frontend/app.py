@@ -102,6 +102,25 @@ with st.sidebar.form("trade_form", clear_on_submit=True):
             except Exception as e:
                 st.error(f"Fehler: {e}")
 
+st.sidebar.markdown("---")
+# Der Urknall (System Reset)
+st.sidebar.subheader("⚠️ Admin-Bereich")
+with st.sidebar.expander("🧨 System-Reset (Urknall)"):
+    st.warning("ACHTUNG: Dies löscht ALLE Trades, das Portfolio und alle Berichte unwiderruflich!")
+    
+    reset_date = st.date_input("Neues Startdatum (Inception Date)", datetime.today())
+    reset_balance = st.number_input("Neues Startkapital (€)", min_value=100.0, value=100000.0, step=1000.0)
+    
+    confirm_reset = st.checkbox("Ich bin mir absolut sicher.")
+    
+    if st.button("🚨 PORTFOLIO ZURÜCKSETZEN", type="primary", use_container_width=True):
+        if confirm_reset:
+            db.reset_database(reset_date.strftime('%Y-%m-%d'), reset_balance)
+            st.success("💥 Urknall ausgeführt! Das System wurde auf Null gesetzt.")
+            st.rerun()
+        else:
+            st.error("Bitte bestätige die Checkbox, um den Reset auszuführen.")
+
 # ==========================================
 # UI: HAUPTBEREICH
 # ==========================================
