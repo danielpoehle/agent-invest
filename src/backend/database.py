@@ -32,6 +32,28 @@ class DatabaseManager:
                 invested_value REAL NOT NULL
             )
         ''')
+
+        # MIGRATION: Wir fügen die neuen Spalten nahtlos hinzu, falls es eine alte DB ist
+        try:
+            self.cursor.execute("ALTER TABLE portfolio ADD COLUMN shares REAL NOT NULL DEFAULT 0")
+            self.cursor.execute("ALTER TABLE portfolio ADD COLUMN avg_price REAL NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass # Spalten existieren bereits
+            
+        # NEU: Tabelle für die Trade-Historie (Das "Kassenbuch")
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                trade_type TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                shares REAL NOT NULL,
+                price_per_share REAL NOT NULL,
+                fee REAL NOT NULL,
+                tax REAL NOT NULL,
+                total_amount REAL NOT NULL
+            )
+        ''')
         
         # Tabelle für die täglichen Berichte
         self.cursor.execute('''
@@ -52,9 +74,10 @@ class DatabaseManager:
     def get_portfolio_for_agent(self):
         """Liest die DB aus und formatiert das Portfolio als JSON/Dict für den Risk Agent."""
         self.cursor.execute("SELECT balance FROM cash_balance WHERE id = 1")
-        cash = self.cursor.fetchone()[0]
+        cash_row = self.cursor.fetchone()
+        cash = cash_row[0] if cash_row else 100000.0
         
-        self.cursor.execute("SELECT ticker, sector, region, invested_value FROM portfolio")
+        self.cursor.execute("SELECT ticker, sector, region, invested_value, shares, avg_price FROM portfolio")
         equities = []
         total_equities_value = 0.0
         
@@ -64,7 +87,9 @@ class DatabaseManager:
                 "ticker": row[0],
                 "sector": row[1],
                 "region": row[2],
-                "value": value
+                "value": value,
+                "shares": row[4],
+                "avg_price": row[5]
             })
             total_equities_value += value
             
@@ -73,6 +98,72 @@ class DatabaseManager:
             "cash": cash,
             "equities": equities
         }
+    
+    def log_trade(self, date_str, trade_type, ticker, shares, price, fee, tax=0.0):
+        """Erfasst einen neuen Trade und aktualisiert Cash und Portfolio mathematisch exakt."""
+        import yfinance as yf # Import für dynamisches Sektor-Lookup
+        
+        self.cursor.execute("SELECT balance FROM cash_balance WHERE id = 1")
+        current_cash = self.cursor.fetchone()[0]
+        
+        # 1. Kosten/Erlöse berechnen
+        if trade_type == 'BUY':
+            total_amount = (shares * price) + fee
+        else:
+            total_amount = (shares * price) - fee - tax
+            
+        # 2. Trade in Historie (Kassenbuch) eintragen
+        self.cursor.execute('''
+            INSERT INTO trade_history (trade_date, trade_type, ticker, shares, price_per_share, fee, tax, total_amount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (date_str, trade_type, ticker, shares, price, fee, tax, total_amount))
+        
+        # 3. Portfolio & Cash aktualisieren
+        if trade_type == 'BUY':
+            if current_cash < total_amount:
+                raise ValueError(f"Nicht genug Cash! Benötigt: {total_amount:.2f}€, Vorhanden: {current_cash:.2f}€")
+            
+            # Cash abziehen
+            self.cursor.execute("UPDATE cash_balance SET balance = ? WHERE id = 1", (current_cash - total_amount,))
+            
+            self.cursor.execute("SELECT shares, invested_value FROM portfolio WHERE ticker = ?", (ticker,))
+            row = self.cursor.fetchone()
+            
+            if row: # Aktie ist schon im Depot (Nachkauf)
+                new_shares = row[0] + shares
+                new_invested = row[1] + (shares * price)
+                avg_price = new_invested / new_shares
+                self.cursor.execute("UPDATE portfolio SET shares = ?, avg_price = ?, invested_value = ? WHERE ticker = ?", 
+                                  (new_shares, avg_price, new_invested, ticker))
+            else: # Neue Aktie
+                # Wir holen uns schnell den Sektor über yfinance für den Risk Agent!
+                try:
+                    info = yf.Ticker(ticker).info
+                    sector = info.get('sector', 'ETF/Unknown')
+                    region = info.get('country', 'Unknown')
+                except:
+                    sector, region = 'Unknown', 'Unknown'
+                    
+                self.cursor.execute("INSERT INTO portfolio (ticker, sector, region, shares, avg_price, invested_value) VALUES (?, ?, ?, ?, ?, ?)", 
+                                  (ticker, sector, region, shares, price, shares * price))
+                                  
+        elif trade_type == 'SELL':
+            # Cash gutschreiben
+            self.cursor.execute("UPDATE cash_balance SET balance = ? WHERE id = 1", (current_cash + total_amount,))
+            
+            self.cursor.execute("SELECT shares, avg_price FROM portfolio WHERE ticker = ?", (ticker,))
+            row = self.cursor.fetchone()
+            if row:
+                current_shares, avg_price = row[0], row[1]
+                new_shares = current_shares - shares
+                
+                if new_shares <= 0.0001: # Komplettverkauf (0.0001 wegen Rundungsfehlern bei Bruchstücken)
+                    self.cursor.execute("DELETE FROM portfolio WHERE ticker = ?", (ticker,))
+                else: # Teilverkauf
+                    new_invested = new_shares * avg_price
+                    self.cursor.execute("UPDATE portfolio SET shares = ?, invested_value = ? WHERE ticker = ?", 
+                                      (new_shares, new_invested, ticker))
+        self.conn.commit()
 
     def update_portfolio(self, ticker, sector, region, amount_eur, is_buy=True):
         """Aktualisiert das Portfolio nach einem Trade (wird später für manuelles Feedback gebraucht)."""

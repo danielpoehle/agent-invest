@@ -50,6 +50,58 @@ st.sidebar.subheader("💼 Aktuelles Portfolio")
 st.sidebar.write(f"**Gesamtwert:** {portfolio['total_value']:,.2f} €")
 st.sidebar.write(f"**Cash:** {portfolio['cash']:,.2f} €")
 
+# Ein Expander, der dir deine genauen Positionen anzeigt
+with st.sidebar.expander("📊 Portfolio-Details ansehen"):
+    if portfolio['equities']:
+        import pandas as pd
+        df = pd.DataFrame(portfolio['equities'])
+        # Wir blenden irrelevante Spalten für die Schnellansicht aus
+        st.dataframe(df[['ticker', 'shares', 'avg_price', 'value']], hide_index=True)
+    else:
+        st.write("Dein Depot ist aktuell leer (100% Cash).")
+
+st.sidebar.markdown("---")
+# Das Formular zur Trade-Erfassung
+st.sidebar.subheader("📝 Trade erfassen")
+with st.sidebar.form("trade_form", clear_on_submit=True):
+    t_date = st.date_input("Transaktions-Datum", datetime.today())
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        t_type = st.selectbox("Aktion", ["BUY", "SELL"])
+    with col2:
+        t_ticker = st.text_input("Ticker (z.B. NVDA)")
+        
+    t_shares = st.number_input("Anzahl Stücke / Anteile", min_value=0.0001, step=1.0, format="%.4f")
+    t_price = st.number_input("Preis pro Anteil (€)", min_value=0.01, step=1.0, format="%.2f")
+    
+    col3, col4 = st.columns(2)
+    with col3:
+        t_fee = st.number_input("Gebühren (€)", min_value=0.0, step=1.0, format="%.2f")
+    with col4:
+        t_tax = st.number_input("Steuern (€)", min_value=0.0, step=1.0, format="%.2f", help="Wird nur bei SELL berechnet")
+        
+    submit_trade = st.form_submit_button("💾 Trade in DB speichern", use_container_width=True)
+    
+    if submit_trade:
+        if not t_ticker:
+            st.error("Bitte einen Ticker eingeben.")
+        else:
+            try:
+                db.log_trade(
+                    date_str=t_date.strftime('%Y-%m-%d'),
+                    trade_type=t_type,
+                    ticker=t_ticker.upper(),
+                    shares=t_shares,
+                    price=t_price,
+                    fee=t_fee,
+                    tax=t_tax
+                )
+                st.success(f"{t_type} erfolgreich: {t_shares}x {t_ticker.upper()} gespeichert!")
+                st.rerun() # Lädt die Seite neu, damit oben der Cash-Bestand aktualisiert wird
+            except Exception as e:
+                st.error(f"Fehler: {e}")
+
 # ==========================================
 # UI: HAUPTBEREICH
 # ==========================================
