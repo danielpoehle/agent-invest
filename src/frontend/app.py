@@ -3,7 +3,9 @@ import sqlite3
 import sys
 import os
 import subprocess
-from datetime import datetime
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
 
 # Wir fügen den src-Ordner zum Pfad hinzu, um die Datenbank importieren zu können
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -46,6 +48,8 @@ today_str = datetime.today().strftime('%Y-%m-%d')
 st.sidebar.markdown("---")
 # Kleines Info-Panel zum Portfolio in der Sidebar
 portfolio = db.get_portfolio_for_agent()
+inception_date_str = db.get_system_config('inception_date') or "Unbekannt"
+
 st.sidebar.subheader("💼 Aktuelles Portfolio")
 st.sidebar.write(f"**Gesamtwert:** {portfolio['total_value']:,.2f} €")
 st.sidebar.write(f"**Cash:** {portfolio['cash']:,.2f} €")
@@ -122,57 +126,172 @@ with st.sidebar.expander("🧨 System-Reset (Urknall)"):
             st.error("Bitte bestätige die Checkbox, um den Reset auszuführen.")
 
 # ==========================================
-# UI: HAUPTBEREICH
+# UI: HAUPTBEREICH (mit Tabs)
 # ==========================================
-st.title(f"Tagesbericht: {selected_date.strftime('%d.%m.%Y')}")
+st.title("KI Investment Dashboard")
 
-# Versuche den Bericht für das gewählte Datum aus der DB zu laden
-db.cursor.execute("SELECT markdown_text, raw_json_data FROM daily_reports WHERE date = ?", (selected_date_str,))
-row = db.cursor.fetchone()
+tab_report, tab_analytics = st.tabs(["📄 Tagesbericht", "📈 Performance & Analytics"])
 
-if row:
-    # 1. BERICHT GEFUNDEN -> ANZEIGEN
-    markdown_text = row[0]
-    raw_json = row[1]
-    
-    st.success(f"Bericht aus der Datenbank geladen.")
-    
-    # Den Markdown-Text des Lead Agents wunderschön rendern
-    st.markdown(markdown_text)
-    
-    # Als Bonus: Die rohen Agenten-Daten ausklappbar machen
-    with st.expander("🛠️ Rohe Agenten-Daten (JSON) einsehen"):
-        st.json(raw_json)
+# ------------------------------------------
+# TAB 1: TAGESBERICHT
+# ------------------------------------------
+
+with tab_report:
+    st.subheader(f"Marktanalyse vom {selected_date.strftime('%d.%m.%Y')}")
+
+    # Versuche den Bericht für das gewählte Datum aus der DB zu laden
+    db.cursor.execute("SELECT markdown_text, raw_json_data FROM daily_reports WHERE date = ?", (selected_date_str,))
+    row = db.cursor.fetchone()
+
+    if row:
+        # 1. BERICHT GEFUNDEN -> ANZEIGEN
+        markdown_text = row[0]
+        raw_json = row[1]
         
-else:
-    # 2. KEIN BERICHT GEFUNDEN
-    st.warning(f"Für das Datum **{selected_date.strftime('%d.%m.%Y')}** liegt kein Bericht vor.")
-    
-    # 3. BONUS: WENN DAS DATUM HEUTE IST -> GENERIEREN ERLAUBEN
-    if selected_date_str == today_str:
-        st.info("Möchtest du deine KI-Agenten jetzt aufwecken und den heutigen Bericht generieren lassen?")
+        st.success(f"Bericht aus der Datenbank geladen.")
         
-        if st.button("🚀 Agenten-Crew starten (Bericht generieren)", use_container_width=True):
+        # Den Markdown-Text des Lead Agents wunderschön rendern
+        st.markdown(markdown_text)
+        
+        # Als Bonus: Die rohen Agenten-Daten ausklappbar machen
+        with st.expander("🛠️ Rohe Agenten-Daten (JSON) einsehen"):
+            st.json(raw_json)
             
-            # Zeigt einen Ladekreis an, während das Backend rechnet
-            with st.spinner("Die Agenten analysieren den Markt. Das kann ca. 1-2 Minuten dauern..."):
-                try:
-                    # Wir rufen unsere main.py als separaten Prozess auf
-                    main_script_path = os.path.join(base_dir, 'src', 'main.py')
-                    
-                    # Führt das Skript im Hintergrund aus
-                    result = subprocess.run(
-                        [sys.executable, main_script_path], 
-                        capture_output=True, 
-                        text=True, 
-                        check=True
-                    )
-                    
-                    st.success("✅ Der Bericht wurde erfolgreich generiert!")
-                    # Lädt die Seite neu, damit der Bericht aus der DB angezeigt wird
-                    st.rerun()
-                    
-                except subprocess.CalledProcessError as e:
-                    st.error("❌ Es gab einen Fehler bei der Ausführung der Agenten.")
-                    with st.expander("Fehlerdetails ansehen"):
-                        st.code(e.stderr or e.stdout)
+    else:
+        # 2. KEIN BERICHT GEFUNDEN
+        st.warning(f"Für das Datum **{selected_date.strftime('%d.%m.%Y')}** liegt kein Bericht vor.")
+        
+        # 3. BONUS: WENN DAS DATUM HEUTE IST -> GENERIEREN ERLAUBEN
+        if selected_date_str == today_str:
+            st.info("Möchtest du deine KI-Agenten jetzt aufwecken und den heutigen Bericht generieren lassen?")
+            
+            if st.button("🚀 Agenten-Crew starten (Bericht generieren)", use_container_width=True):
+                
+                # Zeigt einen Ladekreis an, während das Backend rechnet
+                with st.spinner("Die Agenten analysieren den Markt. Das kann ca. 1-2 Minuten dauern..."):
+                    try:
+                        # Wir rufen unsere main.py als separaten Prozess auf
+                        main_script_path = os.path.join(base_dir, 'src', 'main.py')
+                        
+                        # Führt das Skript im Hintergrund aus
+                        result = subprocess.run(
+                            [sys.executable, main_script_path], 
+                            capture_output=True, 
+                            text=True, 
+                            check=True
+                        )
+                        
+                        st.success("✅ Der Bericht wurde erfolgreich generiert!")
+                        # Lädt die Seite neu, damit der Bericht aus der DB angezeigt wird
+                        st.rerun()
+                        
+                    except subprocess.CalledProcessError as e:
+                        st.error("❌ Es gab einen Fehler bei der Ausführung der Agenten.")
+                        with st.expander("Fehlerdetails ansehen"):
+                            st.code(e.stderr or e.stdout)
+
+# ------------------------------------------
+# TAB 2: PERFORMANCE & ANALYTICS
+# ------------------------------------------
+
+with tab_analytics:
+    def render_analytics():
+        st.subheader("Performance vs. MSCI World (SC0J.DE)")
+        
+        # 1. Daten aus DB holen
+        db.cursor.execute("SELECT date, portfolio_value, benchmark_value FROM portfolio_history ORDER BY date ASC")
+        rows = db.cursor.fetchall()
+        
+        if not rows or len(rows) < 2:
+            st.warning("Noch nicht genügend Historien-Daten vorhanden, um einen Graphen zu zeichnen.")
+            return
+            
+        df = pd.DataFrame(rows, columns=['date', 'Portfolio', 'Benchmark'])
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        
+        # 2. Rendite in Prozent normieren (Start bei 0%)
+        start_pf = df['Portfolio'].iloc[0]
+        start_bm = df['Benchmark'].iloc[0]
+        
+        df['Portfolio Rendite (%)'] = (df['Portfolio'] / start_pf - 1) * 100
+        df['Benchmark Rendite (%)'] = (df['Benchmark'] / start_bm - 1) * 100
+        
+        # 3. KPI Berechnungen
+        tot_ret_pf = df['Portfolio Rendite (%)'].iloc[-1]
+        tot_ret_bm = df['Benchmark Rendite (%)'].iloc[-1]
+        alpha = tot_ret_pf - tot_ret_bm
+        
+        # Max Drawdown
+        roll_max_pf = df['Portfolio'].cummax()
+        drawdown_pf = (df['Portfolio'] - roll_max_pf) / roll_max_pf
+        max_dd_pf = drawdown_pf.min() * 100
+        
+        roll_max_bm = df['Benchmark'].cummax()
+        drawdown_bm = (df['Benchmark'] - roll_max_bm) / roll_max_bm
+        max_dd_bm = drawdown_bm.min() * 100
+        
+        # Beta (Kovarianz / Varianz)
+        daily_returns_pf = df['Portfolio'].pct_change().dropna()
+        daily_returns_bm = df['Benchmark'].pct_change().dropna()
+        
+        if len(daily_returns_bm) > 1 and daily_returns_bm.var() != 0:
+            covariance = np.cov(daily_returns_pf, daily_returns_bm)[0][1]
+            variance = np.var(daily_returns_bm)
+            beta = covariance / variance
+        else:
+            beta = 1.0
+            
+        # CAGR (Jährliche Rendite)
+        days_passed = (df.index[-1] - df.index[0]).days
+        if days_passed > 0:
+            cagr_pf = ((df['Portfolio'].iloc[-1] / start_pf) ** (365.25 / days_passed) - 1) * 100
+        else:
+            cagr_pf = 0.0
+            
+        # Gebühren & Steuern
+        db.cursor.execute("SELECT SUM(fee), SUM(tax) FROM trade_history")
+        fee_tax = db.cursor.fetchone()
+        total_fees = fee_tax[0] if fee_tax[0] else 0.0
+        total_taxes = fee_tax[1] if fee_tax[1] else 0.0
+        
+        # 4. Darstellung (KPI Deck)
+        st.markdown("##### 🔑 Key Performance Indicators")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📈 Total Return", f"{tot_ret_pf:+.2f} %", delta=f"{tot_ret_bm:+.2f} % (BM)")
+        c2.metric("🟢 Alpha", f"{alpha:+.2f} %")
+        c3.metric("📉 Max Drawdown", f"{max_dd_pf:.2f} %", delta=f"vs {max_dd_bm:.2f} % (BM)", delta_color="inverse")
+        c4.metric("⚖️ Beta", f"{beta:.2f}", delta="vs 1.00 (BM)", delta_color="off")
+        
+        st.write("") # Abstand
+        
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("💰 Gesamtwert", f"{df['Portfolio'].iloc[-1]:,.2f} €")
+        c6.metric("⏱️ Rendite p.a.", f"{cagr_pf:+.2f} %")
+        c7.metric("💸 Gezahlte Gebühren", f"{total_fees:,.2f} €")
+        c8.metric("🏛️ Gezahlte Steuern", f"{total_taxes:,.2f} €")
+        
+        st.markdown("---")
+        
+        # 5. Darstellung (Chart)
+        st.markdown("##### 📊 Kapitalkurve (Equity Curve)")
+        st.line_chart(df[['Portfolio Rendite (%)', 'Benchmark Rendite (%)']])
+    
+    # ------------------------------------------
+    # Logik für die Aufwärmphase (Grace Period)
+    # ------------------------------------------
+    if inception_date_str and inception_date_str != "Unbekannt":
+        inc_date = datetime.strptime(inception_date_str, "%Y-%m-%d")
+        days_active = (datetime.today() - inc_date).days
+        
+        if days_active < 21:
+            unlock_date = (inc_date + timedelta(days=21)).strftime('%d.%m.%Y')
+            st.info(f"⏳ **System in der Aufwärmphase (Sammle Daten).** \n\nEin valider Benchmark-Vergleich benötigt Historie und ist erst ab dem **{unlock_date}** aussagekräftig.")
+            
+            # Dev-Modus: Chart trotzdem anzeigen, wenn man es aufklappt
+            with st.expander("🛠️ (Dev-Modus) Analytics trotzdem anzeigen"):
+                render_analytics()
+        else:
+            render_analytics()
+    else:
+        st.warning("Kein gültiges Startdatum (Inception Date) gefunden. Bitte führe einen System-Reset (Urknall) aus.")

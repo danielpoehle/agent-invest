@@ -1,7 +1,10 @@
 import sqlite3
 import json
 import os
-from datetime import datetime
+import math
+import yfinance as yf
+import pandas as pd
+from datetime import datetime,  timedelta
 
 class DatabaseManager:
     """Verwaltet das Portfolio, die Trades und speichert die KI-Berichte in SQLite."""
@@ -12,6 +15,7 @@ class DatabaseManager:
         self.conn = sqlite3.connect(db_path)
         self.cursor = self.conn.cursor()
         self._create_tables()
+        self._migrate_benchmark_if_needed()
 
     def _create_tables(self):
         """Erstellt die Tabellen, falls sie noch nicht existieren."""
@@ -74,6 +78,15 @@ class DatabaseManager:
                 raw_json_data TEXT
             )
         ''')
+
+        # 6. Performance Historie (Equity Curve)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS portfolio_history (
+                date TEXT PRIMARY KEY,
+                portfolio_value REAL NOT NULL,
+                benchmark_value REAL NOT NULL
+            )
+        ''')      
         self.conn.commit()
         
         # Initial-Befüllung, falls die Datenbank ganz neu ist
@@ -85,6 +98,99 @@ class DatabaseManager:
             self.cursor.execute("INSERT OR IGNORE INTO system_config (key, value) VALUES ('inception_date', ?)", (today_str,))
             self.cursor.execute("INSERT OR IGNORE INTO system_config (key, value) VALUES ('inception_balance', ?)", (str(default_start),))
             self.conn.commit()
+    
+    def _migrate_benchmark_if_needed(self):
+        """Prüft, ob das fiktive SC0J.DE Benchmark-Portfolio bereits angelegt wurde. Wenn nicht, wird es generiert."""
+        self.cursor.execute("SELECT value FROM system_config WHERE key = 'benchmark_shares'")
+        if not self.cursor.fetchone():
+            inception_date = self.get_system_config('inception_date')
+            inception_balance = self.get_system_config('inception_balance')
+            
+            if inception_date and inception_balance:
+                print(f"🔄 Migration: Berechne initiale Benchmark-Anteile (SC0J.DE) für den {inception_date}...")
+                self._initialize_benchmark(inception_date, float(inception_balance))
+    
+    def _initialize_benchmark(self, date_str, start_balance):
+        """Simuliert den Kauf des MSCI World ETFs (SC0J.DE) zum Inception Date."""
+        benchmark_ticker = "SC0J.DE"
+        fee = 1.0 # 1 EUR Ordergebühr Simulation
+        
+        # Wir suchen den ETF-Preis an oder knapp vor dem Inception Date (falls es ein Wochenende war)
+        start_dt = pd.to_datetime(date_str) - timedelta(days=7)
+        end_dt = pd.to_datetime(date_str) + timedelta(days=1) # yfinance end ist exklusiv
+        
+        try:
+            data = yf.download(benchmark_ticker, start=start_dt.strftime('%Y-%m-%d'), end=end_dt.strftime('%Y-%m-%d'), progress=False, threads=False)
+            
+            if not data.empty:
+                close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
+                if isinstance(data.columns, pd.MultiIndex):
+                    price = float(data[close_col][benchmark_ticker].iloc[-1])
+                else:
+                    price = float(data[close_col].iloc[-1])
+                
+                # Berechnung: Wieviele ganze Anteile können wir kaufen?
+                available_cash = start_balance - fee
+                shares = math.floor(available_cash / price)
+                leftover_cash = available_cash - (shares * price)
+                
+                # In der Config speichern
+                self.cursor.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('benchmark_ticker', ?)", (benchmark_ticker,))
+                self.cursor.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('benchmark_shares', ?)", (str(shares),))
+                self.cursor.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('benchmark_cash', ?)", (str(leftover_cash),))
+                self.cursor.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES ('benchmark_start_price', ?)", (str(price),))
+                self.conn.commit()
+                
+                # Den initialen Startwert (Tag 0) direkt in die Historie schreiben
+                # (Der Benchmark-Wert an Tag 0 ist exakt start_balance - 1 EUR Gebühr, wir loggen fairerweise den rohen Startwert)
+                self.log_portfolio_history(date_str=date_str, portfolio_val=start_balance, benchmark_val=start_balance)
+                print(f"✅ Benchmark initialisiert: {shares}x SC0J.DE zu {price:.2f}€. Rest-Cash: {leftover_cash:.2f}€")
+            else:
+                print(f"⚠️ Konnte keine SC0J.DE Kurse für {date_str} finden. Benchmark bleibt uninitialisiert.")
+        except Exception as e:
+            print(f"⚠️ Fehler bei der Benchmark-Initialisierung: {e}")
+    
+    def log_portfolio_history(self, date_str=None, portfolio_val=None, benchmark_val=None):
+        """Speichert den täglichen Gesamtwert von unserem Portfolio und vom Benchmark."""
+        if not date_str:
+            date_str = datetime.today().strftime('%Y-%m-%d')
+            
+        # Unseren Portfolio-Wert berechnen, falls nicht übergeben
+        if portfolio_val is None:
+            pf = self.get_portfolio_for_agent()
+            portfolio_val = pf['total_value']
+            
+        # Benchmark-Wert tagesaktuell berechnen, falls nicht übergeben
+        if benchmark_val is None:
+            shares_str = self.get_system_config('benchmark_shares')
+            cash_str = self.get_system_config('benchmark_cash')
+            
+            if shares_str and cash_str:
+                shares = float(shares_str)
+                cash = float(cash_str)
+                
+                try:
+                    data = yf.download("SC0J.DE", period="1d", progress=False, threads=False)
+                    if not data.empty:
+                        close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
+                        if isinstance(data.columns, pd.MultiIndex):
+                            price = float(data[close_col]["SC0J.DE"].iloc[-1])
+                        else:
+                            price = float(data[close_col].iloc[-1])
+                        benchmark_val = (shares * price) + cash
+                    else:
+                        # Fallback (Wochenende)
+                        benchmark_val = portfolio_val
+                except:
+                    benchmark_val = portfolio_val # Fallback
+            else:
+                benchmark_val = portfolio_val
+                
+        self.cursor.execute('''
+            INSERT OR REPLACE INTO portfolio_history (date, portfolio_value, benchmark_value)
+            VALUES (?, ?, ?)
+        ''', (date_str, portfolio_val, benchmark_val))
+        self.conn.commit()
 
     def reset_database(self, start_date_str, start_balance):
         """DER URKNALL: Löscht alle Daten und setzt das System komplett neu auf."""
