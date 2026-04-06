@@ -125,6 +125,24 @@ with st.sidebar.expander("🧨 System-Reset (Urknall)"):
         else:
             st.error("Bitte bestätige die Checkbox, um den Reset auszuführen.")
 
+# Historie manuell nachladen
+with st.sidebar.expander("⏳ Historie nachladen"):
+    st.info("Lädt fehlende Performance-Daten für vergangene Tage nach. Rekonstruiert das Portfolio anhand der Trade-Historie.")
+    backfill_date = st.date_input("Fehlendes Datum auswählen", datetime.today() - timedelta(days=1))
+    
+    if st.button("🔄 Daten nachladen", use_container_width=True):
+        with st.spinner("Rekonstruiere historisches Portfolio..."):
+            success, msg = db.backfill_historical_performance(backfill_date.strftime('%Y-%m-%d'))
+            if success:
+                st.success(msg)
+                # Automatischer Rerun, damit Tabelle & Chart sofort aktualisiert werden
+                # Kurzer Hinweis, damit der Nutzer die Success-Message noch lesen kann
+                import time
+                time.sleep(2) 
+                st.rerun()
+            else:
+                st.error(msg)
+
 # ==========================================
 # UI: HAUPTBEREICH (mit Tabs)
 # ==========================================
@@ -202,8 +220,8 @@ with tab_analytics:
         db.cursor.execute("SELECT date, portfolio_value, benchmark_value FROM portfolio_history ORDER BY date ASC")
         rows = db.cursor.fetchall()
         
-        if not rows or len(rows) < 2:
-            st.warning("Noch nicht genügend Historien-Daten vorhanden, um einen Graphen zu zeichnen.")
+        if not rows:
+            st.warning("Noch keine Historien-Daten vorhanden.")
             return
             
         df = pd.DataFrame(rows, columns=['date', 'Portfolio', 'Benchmark'])
@@ -275,7 +293,28 @@ with tab_analytics:
         
         # 5. Darstellung (Chart)
         st.markdown("##### 📊 Kapitalkurve (Equity Curve)")
-        st.line_chart(df[['Portfolio Rendite (%)', 'Benchmark Rendite (%)']])
+        if len(df) < 2:
+            st.info("Noch nicht genügend Historien-Daten vorhanden, um einen Graphen zu zeichnen.")
+        else:
+            st.line_chart(df[['Portfolio Rendite (%)', 'Benchmark Rendite (%)']])
+
+        # 6. Darstellung (Letzte 15 Einträge)
+        st.markdown("---")
+        st.markdown("##### 📜 Historie (Letzte 15 Einträge)")
+        
+        # Kopiere die relevanten Spalten der letzten 15 Tage
+        df_history = df[['Portfolio', 'Benchmark']].tail(15).copy()
+        # Absteigend sortieren, damit das neueste Datum ganz oben steht
+        df_history = df_history.sort_index(ascending=False)
+        # Datum schöner formatieren
+        df_history.index = df_history.index.strftime('%d.%m.%Y')
+        df_history.index.name = "Datum"
+        
+        # Rendern als stylische Tabelle mit Euro-Formatierung
+        st.dataframe(
+            df_history.style.format("{:,.2f} €"),
+            use_container_width=True
+        )
     
     # ------------------------------------------
     # Logik für die Aufwärmphase (Grace Period)

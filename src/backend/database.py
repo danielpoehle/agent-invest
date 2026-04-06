@@ -192,6 +192,95 @@ class DatabaseManager:
         ''', (date_str, portfolio_val, benchmark_val))
         self.conn.commit()
 
+    def backfill_historical_performance(self, date_str):
+        """Lädt historische Performance-Daten für ein Datum nach (inkl. Portfolio-Rekonstruktion)."""
+        # 1. Prüfen, ob das Datum vor dem Urknall liegt
+        inception_date = self.get_system_config('inception_date')
+        if not inception_date or date_str < inception_date:
+            return False, f"Das Datum {date_str} liegt vor dem Systemstart ({inception_date})."
+
+        # 2. Prüfen, ob für dieses Datum bereits ein Eintrag existiert
+        self.cursor.execute("SELECT 1 FROM portfolio_history WHERE date = ?", (date_str,))
+        if self.cursor.fetchone():
+            return False, f"Für den {date_str} existiert bereits ein Performance-Eintrag."
+
+        # 3. Portfolio-Bestand zum damaligen Zeitpunkt rekonstruieren (via Trade-Historie)
+        self.cursor.execute("SELECT value FROM system_config WHERE key = 'inception_balance'")
+        start_balance_row = self.cursor.fetchone()
+        start_balance = float(start_balance_row[0]) if start_balance_row else 100000.0
+
+        self.cursor.execute('''
+            SELECT trade_type, ticker, shares, total_amount
+            FROM trade_history
+            WHERE trade_date <= ?
+        ''', (date_str,))
+        trades = self.cursor.fetchall()
+
+        current_cash = start_balance
+        holdings = {}
+
+        for t_type, ticker, shares, total_amount in trades:
+            if t_type == 'BUY':
+                current_cash -= total_amount
+                holdings[ticker] = holdings.get(ticker, 0.0) + shares
+            elif t_type == 'SELL':
+                current_cash += total_amount
+                holdings[ticker] = holdings.get(ticker, 0.0) - shares
+                if holdings[ticker] <= 0.0001:
+                    del holdings[ticker]
+
+        # 4. Historische Kurse für die damaligen Aktien-Bestände laden
+        portfolio_value = current_cash
+        if holdings:
+            tickers = list(holdings.keys())
+            start_dt = pd.to_datetime(date_str) - timedelta(days=5) # Puffer für Wochenenden
+            end_dt = pd.to_datetime(date_str) + timedelta(days=1)
+            try:
+                data = yf.download(tickers, start=start_dt.strftime('%Y-%m-%d'), end=end_dt.strftime('%Y-%m-%d'), progress=False, threads=False)
+                if not data.empty:
+                    close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
+                    for ticker, shares in holdings.items():
+                        try:
+                            if len(tickers) > 1:
+                                p = float(data[close_col][ticker].dropna().iloc[-1])
+                            else:
+                                p = float(data[close_col].dropna().iloc[-1])
+                            portfolio_value += (shares * p)
+                        except:
+                            pass # Falls Kurs am Feiertag nicht verfügbar, ignorieren (bzw. auf 0 setzen)
+            except Exception:
+                pass
+
+        # 5. Historischen Wert für den Benchmark (SC0J.DE) berechnen
+        benchmark_value = start_balance # Fallback
+        b_shares_str = self.get_system_config('benchmark_shares')
+        b_cash_str = self.get_system_config('benchmark_cash')
+        if b_shares_str and b_cash_str:
+            b_shares = float(b_shares_str)
+            b_cash = float(b_cash_str)
+            start_dt = pd.to_datetime(date_str) - timedelta(days=5)
+            end_dt = pd.to_datetime(date_str) + timedelta(days=1)
+            try:
+                data = yf.download("SC0J.DE", start=start_dt.strftime('%Y-%m-%d'), end=end_dt.strftime('%Y-%m-%d'), progress=False, threads=False)
+                if not data.empty:
+                    close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
+                    if isinstance(data.columns, pd.MultiIndex):
+                        p = float(data[close_col]["SC0J.DE"].dropna().iloc[-1])
+                    else:
+                        p = float(data[close_col].dropna().iloc[-1])
+                    benchmark_value = (b_shares * p) + b_cash
+            except:
+                pass
+
+        # 6. Nachgeladenen Wert speichern
+        self.cursor.execute('''
+            INSERT INTO portfolio_history (date, portfolio_value, benchmark_value)
+            VALUES (?, ?, ?)
+        ''', (date_str, portfolio_value, benchmark_value))
+        self.conn.commit()
+
+        return True, f"Daten für den {date_str} erfolgreich nachgeladen! (PF: {portfolio_value:,.0f}€ | BM: {benchmark_value:,.0f}€)"
+
     def reset_database(self, start_date_str, start_balance):
         """DER URKNALL: Löscht alle Daten und setzt das System komplett neu auf."""
         # Alle relevanten Tabellen leeren
@@ -217,7 +306,9 @@ class DatabaseManager:
         return row[0] if row else None
 
     def get_portfolio_for_agent(self):
-        """Liest die DB aus und formatiert das Portfolio als JSON/Dict für den Risk Agent."""
+        import yfinance as yf
+        import pandas as pd
+        
         self.cursor.execute("SELECT balance FROM cash_balance WHERE id = 1")
         cash_row = self.cursor.fetchone()
         cash = cash_row[0] if cash_row else 0.0
@@ -226,18 +317,47 @@ class DatabaseManager:
         equities = []
         total_equities_value = 0.0
         
-        for row in self.cursor.fetchall():
-            value = row[3]
-            equities.append({
-                "ticker": row[0],
-                "sector": row[1],
-                "region": row[2],
-                "value": value,
-                "shares": row[4],
-                "avg_price": row[5]
-            })
-            total_equities_value += value
-            
+        rows = self.cursor.fetchall()
+        
+        if rows:
+            tickers = [row[0] for row in rows]
+            # Hole blitzschnell die aktuellen Live-Kurse für alle gehaltenen Positionen
+            try:
+                data = yf.download(tickers, period="1d", progress=False, threads=False)
+            except Exception:
+                data = pd.DataFrame()
+                
+            for row in rows:
+                ticker = row[0]
+                shares = row[4]
+                avg_price = row[5]
+                live_price = avg_price # Fallback auf Kaufpreis, falls Offline/Feiertag
+                
+                if not data.empty:
+                    try:
+                        close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
+                        if len(tickers) > 1:
+                            p = float(data[close_col][ticker].iloc[-1])
+                        else:
+                            p = float(data[close_col].iloc[-1])
+                            
+                        if not pd.isna(p):
+                            live_price = p
+                    except Exception:
+                        pass
+                        
+                current_value = shares * live_price
+                total_equities_value += current_value
+                
+                equities.append({
+                    "ticker": ticker,
+                    "sector": row[1],
+                    "region": row[2],
+                    "value": current_value, # Echter tagesaktueller Wert!
+                    "shares": shares,
+                    "avg_price": avg_price
+                })
+                
         return {
             "total_value": cash + total_equities_value,
             "cash": cash,
@@ -310,6 +430,9 @@ class DatabaseManager:
                                       (new_shares, new_invested, ticker))
         self.conn.commit()
 
+        # NACH JEDEM TRADE: Den Portfolio-Wert loggen, um die Historie aktuell zu halten!
+        self.log_portfolio_history(date_str=date_str)        
+
     def update_portfolio(self, ticker, sector, region, amount_eur, is_buy=True):
         """Aktualisiert das Portfolio nach einem Trade (wird später für manuelles Feedback gebraucht)."""
         self.cursor.execute("SELECT balance FROM cash_balance WHERE id = 1")
@@ -349,6 +472,9 @@ class DatabaseManager:
             VALUES (?, ?, ?)
         ''', (today, markdown_text, raw_json))
         self.conn.commit()
+
+        # Nach dem Berichts-Lauf ebenfalls den aktuellen Stand für die Kapitalkurve loggen
+        self.log_portfolio_history(date_str=today)
     
     def has_report_for_today(self):
         """Prüft, ob für den heutigen Tag bereits ein Bericht existiert."""

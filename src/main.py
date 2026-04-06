@@ -35,7 +35,10 @@ def main():
         print("\n⚠️ ACHTUNG: Es existiert bereits ein Tagesbericht für heute in der Datenbank!")
         user_input = input("Möchtest du den Bericht überschreiben und die Agenten erneut kostenpflichtig starten? (j/n): ")
         if user_input.lower() != 'j':
-            print("Abbruch. Das System wird beendet.")
+            # NEU: Auch wenn wir keinen neuen Bericht generieren, loggen wir den heutigen Performance-Wert!
+            print("\n🔄 Aktualisiere tagesaktuelle Portfolio- und Benchmark-Werte in der Historie...")
+            db.log_portfolio_history()
+            print("Fertig. Das System wird beendet.")
             return
     
     # ---------------------------------------------------------
