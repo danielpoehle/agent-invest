@@ -48,6 +48,13 @@ class DatabaseManager:
             )
         ''')
 
+        # MIGRATION: Füge die currency Spalte hinzu, falls sie bei einer alten DB noch fehlt
+        try:
+            self.cursor.execute("ALTER TABLE portfolio ADD COLUMN currency TEXT NOT NULL DEFAULT 'EUR'")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass # Spalte existiert bereits
+
         # MIGRATION: Wir fügen die neuen Spalten nahtlos hinzu, falls es eine alte DB ist
         try:
             self.cursor.execute("ALTER TABLE portfolio ADD COLUMN shares REAL NOT NULL DEFAULT 0")
@@ -98,6 +105,45 @@ class DatabaseManager:
             self.cursor.execute("INSERT OR IGNORE INTO system_config (key, value) VALUES ('inception_date', ?)", (today_str,))
             self.cursor.execute("INSERT OR IGNORE INTO system_config (key, value) VALUES ('inception_balance', ?)", (str(default_start),))
             self.conn.commit()
+
+    def _get_fx_rate(self, currency, start_dt_str=None, end_dt_str=None):
+        """Holt den Wechselkurs zur Umrechnung der Fremdwährung in EUR (inkl. GBp Handling)."""
+        print(f"[DEBUG-FX] _get_fx_rate aufgerufen für Währung: '{currency}'")
+        if currency.upper() in ['EUR', '']:
+            return 1.0
+            
+        # GBp (Pence Sterling) und GBX werden über GBP (British Pound) abgerechnet
+        base_currency = 'GBP' if currency in ['GBp', 'GBX'] else currency.upper()
+        fx_ticker = f"{base_currency}EUR=X"
+        print(f"[DEBUG-FX] Lade Wechselkurs-Ticker: {fx_ticker}")
+        
+        try:
+            if start_dt_str and end_dt_str:
+                data = yf.download(fx_ticker, start=start_dt_str, end=end_dt_str, progress=False, threads=False)
+            else:
+                data = yf.download(fx_ticker, period="1d", progress=False, threads=False)
+                
+            if not data.empty:
+                col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
+                if isinstance(data.columns, pd.MultiIndex):
+                    rate = float(data[col][fx_ticker].dropna().iloc[-1])
+                else:
+                    rate = float(data[col].dropna().iloc[-1])
+
+                print(f"[DEBUG-FX] Erfolgreich geladen. Roh-Rate für {fx_ticker}: {rate}")
+
+                # Bei Pence Sterling (GBp) müssen wir das Ergebnis durch 100 teilen!
+                if currency in ['GBp', 'GBX']:
+                    rate = rate / 100.0
+                    print(f"[DEBUG-FX] Währung ist Pence (GBp/GBX). Teile Rate durch 100 -> Neue Rate: {rate}")
+                    
+                return rate
+            else:
+                print(f"[DEBUG-FX] yfinance lieferte leeren DataFrame für {fx_ticker} zurück!")
+        except Exception as e:
+            print(f"⚠️ Warnung: Konnte FX Rate für {currency} nicht laden ({e}). Nutze Fallback 1:1.")
+            
+        return 1.0
     
     def _migrate_benchmark_if_needed(self):
         """Prüft, ob das fiktive SC0J.DE Benchmark-Portfolio bereits angelegt wurde. Wenn nicht, wird es generiert."""
@@ -150,6 +196,15 @@ class DatabaseManager:
         except Exception as e:
             print(f"⚠️ Fehler bei der Benchmark-Initialisierung: {e}")
     
+    def _get_last_benchmark_value(self, date_str=None, fallback=0.0):
+        """Holt den zuletzt bekannten Benchmark-Wert aus der Historie (für Wochenenden/Feiertage)."""
+        if date_str:
+            self.cursor.execute("SELECT benchmark_value FROM portfolio_history WHERE date < ? ORDER BY date DESC LIMIT 1", (date_str,))
+        else:
+            self.cursor.execute("SELECT benchmark_value FROM portfolio_history ORDER BY date DESC LIMIT 1")
+        row = self.cursor.fetchone()
+        return row[0] if row else fallback
+    
     def log_portfolio_history(self, date_str=None, portfolio_val=None, benchmark_val=None):
         """Speichert den täglichen Gesamtwert von unserem Portfolio und vom Benchmark."""
         if not date_str:
@@ -180,11 +235,11 @@ class DatabaseManager:
                         benchmark_val = (shares * price) + cash
                     else:
                         # Fallback (Wochenende)
-                        benchmark_val = portfolio_val
+                        benchmark_val = self._get_last_benchmark_value(fallback=portfolio_val)
                 except:
-                    benchmark_val = portfolio_val # Fallback
+                    benchmark_val = self._get_last_benchmark_value(fallback=portfolio_val) # Fallback
             else:
-                benchmark_val = portfolio_val
+                benchmark_val = self._get_last_benchmark_value(fallback=portfolio_val)
                 
         self.cursor.execute('''
             INSERT OR REPLACE INTO portfolio_history (date, portfolio_value, benchmark_value)
@@ -233,10 +288,14 @@ class DatabaseManager:
         portfolio_value = current_cash
         if holdings:
             tickers = list(holdings.keys())
-            start_dt = pd.to_datetime(date_str) - timedelta(days=5) # Puffer für Wochenenden
-            end_dt = pd.to_datetime(date_str) + timedelta(days=1)
+            start_dt_str = (pd.to_datetime(date_str) - timedelta(days=5)).strftime('%Y-%m-%d') # Puffer für Wochenenden
+            end_dt_str = (pd.to_datetime(date_str) + timedelta(days=1)).strftime('%Y-%m-%d')
+
+            # Währungen für die historischen Ticker abrufen
+            fx_rates_cache = {'EUR': 1.0}
+
             try:
-                data = yf.download(tickers, start=start_dt.strftime('%Y-%m-%d'), end=end_dt.strftime('%Y-%m-%d'), progress=False, threads=False)
+                data = yf.download(tickers, start=start_dt_str, end=end_dt_str, progress=False, threads=False)
                 if not data.empty:
                     close_col = 'Close' if 'Close' in data.columns.get_level_values(0) else 'Adj Close'
                     for ticker, shares in holdings.items():
@@ -245,7 +304,19 @@ class DatabaseManager:
                                 p = float(data[close_col][ticker].dropna().iloc[-1])
                             else:
                                 p = float(data[close_col].dropna().iloc[-1])
-                            portfolio_value += (shares * p)
+                            
+                            # Währung abfragen (Fallback EUR)
+                            try:
+                                currency = yf.Ticker(ticker).info.get('currency', 'EUR')
+                            except:
+                                currency = 'EUR'
+                                
+                            # Umrechnen in EUR
+                            if currency not in fx_rates_cache:
+                                fx_rates_cache[currency] = self._get_fx_rate(currency, start_dt_str, end_dt_str)
+                            
+                            p_eur = p * fx_rates_cache[currency]
+                            portfolio_value += (shares * p_eur)
                         except:
                             pass # Falls Kurs am Feiertag nicht verfügbar, ignorieren (bzw. auf 0 setzen)
             except Exception:
@@ -306,6 +377,7 @@ class DatabaseManager:
         return row[0] if row else None
 
     def get_portfolio_for_agent(self):
+        print("\n[DEBUG-PORTFOLIO] get_portfolio_for_agent gestartet...")
         import yfinance as yf
         import pandas as pd
         
@@ -313,7 +385,7 @@ class DatabaseManager:
         cash_row = self.cursor.fetchone()
         cash = cash_row[0] if cash_row else 0.0
         
-        self.cursor.execute("SELECT ticker, sector, region, invested_value, shares, avg_price FROM portfolio")
+        self.cursor.execute("SELECT ticker, sector, region, invested_value, shares, avg_price, currency FROM portfolio")
         equities = []
         total_equities_value = 0.0
         
@@ -321,6 +393,7 @@ class DatabaseManager:
         
         if rows:
             tickers = [row[0] for row in rows]
+            fx_rates_cache = {'EUR': 1.0}
             # Hole blitzschnell die aktuellen Live-Kurse für alle gehaltenen Positionen
             try:
                 data = yf.download(tickers, period="1d", progress=False, threads=False)
@@ -332,6 +405,10 @@ class DatabaseManager:
                 shares = row[4]
                 avg_price = row[5]
                 live_price = avg_price # Fallback auf Kaufpreis, falls Offline/Feiertag
+                currency = row[6]
+
+                print(f"[DEBUG-PORTFOLIO] ---> Starte Bewertung für: {ticker}")
+                print(f"[DEBUG-PORTFOLIO] Gespeicherte Währung in DB: '{currency}'")
                 
                 if not data.empty:
                     try:
@@ -345,8 +422,22 @@ class DatabaseManager:
                             live_price = p
                     except Exception:
                         pass
-                        
-                current_value = shares * live_price
+
+                print(f"[DEBUG-PORTFOLIO] Live-Preis (Nativ): {live_price}")
+
+                # Umrechnung in EUR
+                if currency not in fx_rates_cache:
+                    fx_rates_cache[currency] = self._get_fx_rate(currency)
+                
+                rate = fx_rates_cache[currency]
+                print(f"[DEBUG-PORTFOLIO] Verwendete FX-Rate: {rate}")
+                
+                live_price_eur = live_price * rate
+                print(f"[DEBUG-PORTFOLIO] Live-Preis (EUR): {live_price_eur:.2f} €")
+                
+                current_value = shares * live_price_eur
+                print(f"[DEBUG-PORTFOLIO] Wert der Position: {current_value:.2f} €\n")
+
                 total_equities_value += current_value
                 
                 equities.append({
@@ -366,6 +457,7 @@ class DatabaseManager:
     
     def log_trade(self, date_str, trade_type, ticker, shares, price, fee, tax=0.0):
         """Erfasst einen neuen Trade und aktualisiert Cash und Portfolio mathematisch exakt."""
+        # price ist hier in EURO (Eingabe durch Nutzer)
         import yfinance as yf # Import für dynamisches Sektor-Lookup
         
         self.cursor.execute("SELECT balance FROM cash_balance WHERE id = 1")
@@ -406,11 +498,13 @@ class DatabaseManager:
                     info = yf.Ticker(ticker).info
                     sector = info.get('sector', 'ETF/Unknown')
                     region = info.get('country', 'Unknown')
+                    currency = info.get('currency', 'EUR')
                 except:
-                    sector, region = 'Unknown', 'Unknown'
+                    sector, region, currency = 'Unknown', 'Unknown', 'EUR'
                     
-                self.cursor.execute("INSERT INTO portfolio (ticker, sector, region, shares, avg_price, invested_value) VALUES (?, ?, ?, ?, ?, ?)", 
-                                  (ticker, sector, region, shares, price, shares * price))
+                print(f"[DEBUG-LOG-TRADE] Neuer Kauf von {ticker}. API lieferte Währung: '{currency}'")    
+                self.cursor.execute("INSERT INTO portfolio (ticker, sector, region, shares, avg_price, invested_value, currency) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                                  (ticker, sector, region, shares, price, shares * price, currency))
                                   
         elif trade_type == 'SELL':
             # Cash gutschreiben
