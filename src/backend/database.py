@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import datetime,  timedelta
 
 class DatabaseManager:
-    """Verwaltet das Portfolio, die Trades und speichert die KI-Berichte in SQLite."""
+    """Verwaltet das Portfolio, Trades, Berichte, Konfigurationen und die Performance-Historie in SQLite."""
     
     def __init__(self, db_path="data/investment_system.db"):
         # Stelle sicher, dass der data-Ordner existiert
@@ -44,7 +44,10 @@ class DatabaseManager:
                 region TEXT NOT NULL,
                 shares REAL NOT NULL DEFAULT 0,
                 avg_price REAL NOT NULL DEFAULT 0,
-                invested_value REAL NOT NULL
+                invested_value REAL NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'EUR',
+                stop_loss REAL NOT NULL DEFAULT 0.0,
+                take_profit REAL NOT NULL DEFAULT 0.0
             )
         ''')
 
@@ -54,6 +57,13 @@ class DatabaseManager:
             self.conn.commit()
         except sqlite3.OperationalError:
             pass # Spalte existiert bereits
+
+        try:
+            self.cursor.execute("ALTER TABLE portfolio ADD COLUMN stop_loss REAL NOT NULL DEFAULT 0.0")
+            self.cursor.execute("ALTER TABLE portfolio ADD COLUMN take_profit REAL NOT NULL DEFAULT 0.0")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass 
 
         # MIGRATION: Wir fügen die neuen Spalten nahtlos hinzu, falls es eine alte DB ist
         try:
@@ -385,7 +395,8 @@ class DatabaseManager:
         cash_row = self.cursor.fetchone()
         cash = cash_row[0] if cash_row else 0.0
         
-        self.cursor.execute("SELECT ticker, sector, region, invested_value, shares, avg_price, currency FROM portfolio")
+        # Wir lesen auch SL und TP aus
+        self.cursor.execute("SELECT ticker, sector, region, invested_value, shares, avg_price, currency, stop_loss, take_profit FROM portfolio")
         equities = []
         total_equities_value = 0.0
         
@@ -406,6 +417,8 @@ class DatabaseManager:
                 avg_price = row[5]
                 live_price = avg_price # Fallback auf Kaufpreis, falls Offline/Feiertag
                 currency = row[6]
+                stop_loss = row[7]
+                take_profit = row[8]
 
                 print(f"[DEBUG-PORTFOLIO] ---> Starte Bewertung für: {ticker}")
                 print(f"[DEBUG-PORTFOLIO] Gespeicherte Währung in DB: '{currency}'")
@@ -446,7 +459,11 @@ class DatabaseManager:
                     "region": row[2],
                     "value": current_value, # Echter tagesaktueller Wert!
                     "shares": shares,
-                    "avg_price": avg_price
+                    "avg_price_eur": avg_price,
+                    "currency_native": currency,
+                    "live_price_native": live_price,
+                    "stop_loss_native": stop_loss,
+                    "take_profit_native": take_profit
                 })
                 
         return {
@@ -455,7 +472,7 @@ class DatabaseManager:
             "equities": equities
         }
     
-    def log_trade(self, date_str, trade_type, ticker, shares, price, fee, tax=0.0):
+    def log_trade(self, date_str, trade_type, ticker, shares, price, fee, tax=0.0, stop_loss=0.0, take_profit=0.0):
         """Erfasst einen neuen Trade und aktualisiert Cash und Portfolio mathematisch exakt."""
         # price ist hier in EURO (Eingabe durch Nutzer)
         import yfinance as yf # Import für dynamisches Sektor-Lookup
@@ -490,8 +507,12 @@ class DatabaseManager:
                 new_shares = row[0] + shares
                 new_invested = row[1] + (shares * price)
                 avg_price = new_invested / new_shares
-                self.cursor.execute("UPDATE portfolio SET shares = ?, avg_price = ?, invested_value = ? WHERE ticker = ?", 
-                                  (new_shares, avg_price, new_invested, ticker))
+                # Wir aktualisieren SL und TP, falls der Nutzer neue eingetragen hat
+                self.cursor.execute('''
+                    UPDATE portfolio 
+                    SET shares = ?, avg_price = ?, invested_value = ?, stop_loss = ?, take_profit = ? 
+                    WHERE ticker = ?
+                ''', (new_shares, avg_price, new_invested, stop_loss, take_profit, ticker))
             else: # Neue Aktie
                 # Wir holen uns schnell den Sektor über yfinance für den Risk Agent!
                 try:
@@ -503,8 +524,11 @@ class DatabaseManager:
                     sector, region, currency = 'Unknown', 'Unknown', 'EUR'
                     
                 print(f"[DEBUG-LOG-TRADE] Neuer Kauf von {ticker}. API lieferte Währung: '{currency}'")    
-                self.cursor.execute("INSERT INTO portfolio (ticker, sector, region, shares, avg_price, invested_value, currency) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                                  (ticker, sector, region, shares, price, shares * price, currency))
+                self.cursor.execute('''
+                    INSERT INTO portfolio 
+                    (ticker, sector, region, shares, avg_price, invested_value, currency, stop_loss, take_profit) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (ticker, sector, region, shares, price, shares * price, currency, stop_loss, take_profit))
                                   
         elif trade_type == 'SELL':
             # Cash gutschreiben
@@ -520,6 +544,7 @@ class DatabaseManager:
                     self.cursor.execute("DELETE FROM portfolio WHERE ticker = ?", (ticker,))
                 else: # Teilverkauf
                     new_invested = new_shares * avg_price
+                    # Bei Teilverkauf bleiben SL/TP unverändert
                     self.cursor.execute("UPDATE portfolio SET shares = ?, invested_value = ? WHERE ticker = ?", 
                                       (new_shares, new_invested, ticker))
         self.conn.commit()

@@ -51,6 +51,7 @@ portfolio = db.get_portfolio_for_agent()
 inception_date_str = db.get_system_config('inception_date') or "Unbekannt"
 
 st.sidebar.subheader("💼 Aktuelles Portfolio")
+st.sidebar.caption(f"System gestartet am: {inception_date_str}")
 st.sidebar.write(f"**Gesamtwert:** {portfolio['total_value']:,.2f} €")
 st.sidebar.write(f"**Cash:** {portfolio['cash']:,.2f} €")
 
@@ -60,7 +61,7 @@ with st.sidebar.expander("📊 Portfolio-Details ansehen"):
         import pandas as pd
         df = pd.DataFrame(portfolio['equities'])
         # Wir blenden irrelevante Spalten für die Schnellansicht aus
-        st.dataframe(df[['ticker', 'shares', 'avg_price', 'value']], hide_index=True)
+        st.dataframe(df[['ticker', 'shares', 'avg_price_eur', 'value', 'stop_loss_native']], hide_index=True)
     else:
         st.write("Dein Depot ist aktuell leer (100% Cash).")
 
@@ -76,8 +77,17 @@ with st.sidebar.form("trade_form", clear_on_submit=True):
     with col2:
         t_ticker = st.text_input("Ticker (z.B. NVDA)")
         
-    t_shares = st.number_input("Anzahl Stücke / Anteile", min_value=0.0001, step=1.0, format="%.4f")
-    t_price = st.number_input("Preis pro Anteil (€)", min_value=0.01, step=1.0, format="%.2f")
+    t_shares = st.number_input("Anzahl Stücke / Anteile", min_value=0.0000, step=1.0, format="%.4f")
+    t_price = st.number_input("Kaufpreis (€)", min_value=0.01, step=1.0, format="%.2f", help="Dein abgerechneter Euro-Preis")
+
+    st.markdown("---")
+    st.caption("Optional: Trading Level (In Nativer Währung!)")
+    col_sl, col_tp = st.columns(2)
+    with col_sl:
+        t_sl = st.number_input("Stop Loss", min_value=0.0, step=1.0, format="%.2f", help="Wert in Originalwährung (z.B. EUR, USD, GBp)")
+    with col_tp:
+        t_tp = st.number_input("Take Profit", min_value=0.0, step=1.0, format="%.2f", help="Wert in Originalwährung (z.B. EUR, USD, GBp)")
+    st.markdown("---")
     
     col3, col4 = st.columns(2)
     with col3:
@@ -99,7 +109,9 @@ with st.sidebar.form("trade_form", clear_on_submit=True):
                     shares=t_shares,
                     price=t_price,
                     fee=t_fee,
-                    tax=t_tax
+                    tax=t_tax,
+                    stop_loss=t_sl,     # NEU ÜBERGEBEN
+                    take_profit=t_tp    # NEU ÜBERGEBEN
                 )
                 st.success(f"{t_type} erfolgreich: {t_shares}x {t_ticker.upper()} gespeichert!")
                 st.rerun() # Lädt die Seite neu, damit oben der Cash-Bestand aktualisiert wird
